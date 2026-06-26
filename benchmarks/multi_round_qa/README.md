@@ -32,7 +32,7 @@ python3 multi_round_qa.py \
     --base-url http://localhost:8000/v1
 ```
 
-Use ctrl-C to terminate the benchmark at any time, and the the script will write each request's detailed stats to `summary.csv`.
+Use ctrl-C to terminate the benchmark at any time, and the the script will write each request's detailed stats to `summary.csv`, plus an aggregated performance summary (QPS, throughput, TTFT, etc.) to `summary_performance.csv`.
 
 
 *Note:* the above command requires there is a serving engine with the `mistralai/Mistral-7B-Instruct-v0.2` model served locally at `http://localhost:8000/v1`. Here's an example command to launch the serving engine:
@@ -61,19 +61,20 @@ vllm serve mistralai/Mistral-7B-Instruct-v0.2 --disable-log-requests
 - `--base-url <str>`: The URL endpoint for the language model server.
 
 #### Configuring the experiment (Optional)
-- `--output <str>`: The csv file to dump the detailed stats for each query (default = summary.csv)
+- `--output <str>`: The csv file to dump the detailed per-request stats for each query (default = summary.csv)
+- `--performance-output <str>`: The csv file to dump the aggregated performance summary (Config/Actual QPS, processing speed, input/output tokens per second, average generation throughput, average TTFT, time range, token totals). Default = the `--output` path with a `_performance` suffix (e.g. `summary_performance.csv`). The same metrics are always printed to the terminal.
 - `--log-interval <float>`: Time between each performance summary log in seconds (default = 30)
 - `--time <float>`: Total time to run the experiment (default = forever)
 - `--dry-run`: If this option is present, the script will not send requests to the endpoint (server). This option is useful when quickly verifying whether a script can properly process trace data.
 
 #### Processing previous outputs only (Optional)
-- `--process-summary <filename>`: if this option is present, the script will only process the existing output csv and print out the summary without running any experiment.
+- `--process-summary <filename>`: if this option is present, the script will only process the existing per-request output csv and print out the summary without running any experiment. Combine with `--performance-output <filename>` to also write the aggregated performance summary to a CSV.
 
 ### Example Use Case
 
 The above command starts a benchmark with 10 users engaging in 5 rounds of interaction, with an expected QPS of 0.5. It assumes there is already a serving engine (vLLM or lmcache\_vllm) with the `mistralai/Mistral-7B-Instruct-v0.2` model served locally at `http://localhost:8000/v1`.
 
-Upon completion, a summary of key performance metrics (e.g., QPS, average response time) is printed to the console and saved as `summary.csv`.
+Upon completion, a summary of key performance metrics (e.g., QPS, average response time) is printed to the console and saved as `summary_performance.csv`, while each request's detailed stats are saved as `summary.csv`.
 
 ## Understanding the Benchmark Script
 

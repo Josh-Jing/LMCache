@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Union
 import argparse
 import asyncio
 import json
 import logging
+import os
 import time
 
 # Third Party
@@ -14,6 +16,26 @@ import openai
 import pandas as pd
 
 logger = init_logger(__name__, logging.INFO)
+
+
+def default_performance_output(request_output: str) -> str:
+    """Derive the aggregated-metrics CSV path from the per-request output path.
+
+    The benchmark writes two files: the per-request detail CSV (``--output``)
+    and an aggregated performance-summary CSV. This helper computes the latter's
+    default name by inserting a ``_performance`` suffix before the ``.csv``
+    extension so the two files sit next to each other.
+
+    Args:
+        request_output: The per-request detail output path (e.g.
+            ``"summary.csv"`` or ``"/tmp/run.details.csv"``).
+
+    Returns:
+        The derived performance-summary CSV path as a string (e.g.
+        ``"summary_performance.csv"`` or ``"/tmp/run.details_performance.csv"``).
+    """
+    path = Path(request_output)
+    return str(path.with_name(f"{path.stem}_performance.csv"))
 
 
 @dataclass
@@ -473,7 +495,26 @@ class UserSessionManager:
         end_time: Optional[float] = None,
         pending_queries: int = 0,
         config_qps: Optional[float] = None,
+        performance_output: Optional[Union[str, "os.PathLike[str]"]] = None,
     ):
+        """Compute and print the aggregated performance summary.
+
+        Args:
+            df: Per-request stats with ``launch_time``, ``finish_time``,
+                ``prompt_tokens``, ``generation_tokens``, ``generation_time``
+                and ``ttft`` columns.
+            start_time: Window start (unix seconds). When given together with
+                ``end_time``, only requests inside the window are aggregated.
+            end_time: Window end (unix seconds).
+            pending_queries: Number of in-flight (unfinished) requests.
+            config_qps: The configured QPS, printed for reference.
+            performance_output: When provided, the aggregated metrics are also
+                written as a single-row CSV to this path (in addition to being
+                printed to the terminal).
+
+        Returns:
+            The (possibly window-filtered) per-request DataFrame.
+        """
         if start_time and end_time:
             launched_queries = len(
                 df.query(f"{start_time} <= launch_time <= {end_time}")
@@ -543,9 +584,50 @@ class UserSessionManager:
 
         print("===============================================================")
         print("\n")
+
+        if performance_output is not None:
+            metrics = {
+                "config_qps": config_qps,
+                "actual_qps": actual_qps,
+                "processing_speed": finished_qps,
+                "requests_on_the_fly": pending_queries,
+                "input_tokens_per_second": average_prefill_speed,
+                "output_tokens_per_second": average_generation_speed,
+                "average_generation_throughput_per_request": (
+                    average_generation_speed_per_request
+                ),
+                "average_ttft": average_ttft,
+                "time_range_start": start_time,
+                "time_range_end": end_time,
+                "total_time": total_time,
+                "launched_queries": launched_queries,
+                "finished_queries": total_finished_requests,
+                "pending_queries": pending_queries,
+                "total_prompt_tokens": total_prompt_tokens,
+                "total_generation_tokens": total_generation_tokens,
+            }
+            pd.DataFrame([metrics]).to_csv(performance_output, index=False)
+            logger.info(f"Wrote performance summary to {performance_output}")
+
         return df
 
-    def summary(self, start_time: float, end_time: float) -> pd.DataFrame:
+    def summary(
+        self,
+        start_time: float,
+        end_time: float,
+        performance_output: Optional[Union[str, "os.PathLike[str]"]] = None,
+    ) -> pd.DataFrame:
+        """Aggregate per-request stats and print/persist the performance summary.
+
+        Args:
+            start_time: Window start (unix seconds).
+            end_time: Window end (unix seconds).
+            performance_output: When provided, the aggregated metrics are also
+                written as a single-row CSV to this path.
+
+        Returns:
+            The window-filtered per-request DataFrame.
+        """
         if len(self.session_summaries) == 0 and len(self.sessions) == 0:
             return pd.DataFrame()
 
@@ -558,7 +640,12 @@ class UserSessionManager:
         qps = self.workload_config.qps
 
         df = UserSessionManager.ProcessSummary(
-            df, start_time, end_time, pending_queries, qps
+            df,
+            start_time,
+            end_time,
+            pending_queries,
+            qps,
+            performance_output=performance_output,
         )
         return df
 
@@ -629,6 +716,14 @@ def parse_arguments():
         help="The output file name (ended with csv or txt) for the summary csv and txt",
     )
     parser.add_argument(
+        "--performance-output",
+        type=str,
+        default=None,
+        help="The CSV file to dump the aggregated performance summary "
+        "(QPS, throughput, TTFT, etc.). Defaults to the --output path with a "
+        "'_performance' suffix (e.g. summary_performance.csv).",
+    )
+    parser.add_argument(
         "--init-user-id",
         type=int,
         default=0,
@@ -681,23 +776,35 @@ def parse_process_summary():
     )
 
     parser.add_argument("--process-summary", type=str, default=None)
+    parser.add_argument("--performance-output", type=str, default=None)
 
     args, _ = parser.parse_known_args()
     return args
 
 
-def process_output(filename):
+def process_output(filename, performance_output=None):
+    """Re-process an existing per-request summary CSV.
+
+    Args:
+        filename: Path to an existing per-request detail CSV.
+        performance_output: When provided, write the aggregated performance
+            metrics to this CSV path as well.
+    """
     logger.warning(
         f"Processing the existing summary file {filename}"
         ", ignoring all the other arguments"
     )
-    UserSessionManager.ProcessSummary(pd.read_csv(filename), pending_queries=0)
+    UserSessionManager.ProcessSummary(
+        pd.read_csv(filename),
+        pending_queries=0,
+        performance_output=performance_output,
+    )
 
 
 def main():
     args = parse_process_summary()
     if args.process_summary:
-        process_output(args.process_summary)
+        process_output(args.process_summary, args.performance_output)
         return
 
     args = parse_arguments()
@@ -737,6 +844,9 @@ def main():
     num_steps = 0
     start_time = time.time()
     last_summary_time = start_time
+    performance_output = args.performance_output or default_performance_output(
+        args.output
+    )
     try:
         while True:
             num_steps += 1
@@ -755,8 +865,11 @@ def main():
 
     AsyncLoopWrapper.StopLoop()
 
-    logger.info(f"Finished benchmarking, dumping summary to {args.output}")
-    summary = manager.summary(0, time.time())
+    logger.info(
+        f"Finished benchmarking, dumping per-request summary to {args.output} "
+        f"and performance summary to {performance_output}"
+    )
+    summary = manager.summary(0, time.time(), performance_output=performance_output)
     summary.to_csv(args.output, index=False)
 
 
